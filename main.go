@@ -10,9 +10,13 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-var devAddr = "10.100.10.1"   // This is where you'll SSH into
-var tunAddr = "10.100.10.220" // This is the tunnel we're monitoring
-var wanAddr = "1.1.1.1"       // This is the WAN address we're using to check connectivity
+var devAddr = "10.100.10.1"  // This is where you'll SSH into
+var tunAddr = "10.100.10.11" // This is the tunnel we're monitoring
+var wanAddr = "1.1.1.1"      // This is the WAN address we're using to check connectivity
+
+func ticket() {
+	fmt.Println(PostTicketPayload())
+}
 
 func SshIntoHost(addr, user, pass, cmd string) error {
 	config := &ssh.ClientConfig{
@@ -141,9 +145,11 @@ func main() {
 			} else {
 				AddtoLog(fmt.Sprintf("WAN address %s is reachable. Restarting tunnel...", wanAddr))
 				initTtyToHost()
+				ticket()
 			}
 		} else {
 			AddtoLog(fmt.Sprintf("Tunnel address %s is reachable. No action needed.", tunAddr))
+			ticket()
 		}
 		time.Sleep(1 * time.Second) // Wait before the next iteration
 	}
