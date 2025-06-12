@@ -4,9 +4,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 
-	"github.com/joho/godotenv"
+	"pingo/static"
 )
 
 type ContactRef struct {
@@ -249,17 +250,12 @@ type Ticket struct {
 }
 
 func ManageAuth() string {
-	envMap, err := godotenv.Read("manage.env")
-	if err != nil {
-		fmt.Println("Error loading manage.env file:", err)
-	}
-	companyName := envMap["COMPANY"]
-	publicKey := envMap["PUB_KEY"]
-	privateKey := envMap["PVT_KEY"]
+	companyName := static.Manage.User
+	publicKey := static.Manage.PubKey
+	privateKey := static.Manage.PrvKey
 	combinedStr := companyName + "+" + publicKey + ":" + privateKey
 	base64Str := base64.StdEncoding.EncodeToString([]byte(combinedStr))
 	return base64Str
-
 }
 
 func PostTicketPayload() []byte {
@@ -284,4 +280,24 @@ func PostTicketPayload() []byte {
 		return nil
 	}
 	return jsonData
+}
+
+// Checks if the device address is reachable before attempting to SSH into it
+func InitTtyToHost() {
+	if !TestAddress(devAddr, 2, 1*time.Second, 10*time.Second) {
+		AddtoLog(fmt.Sprintf("Device address %s is unresponsive before attempting to SSH", devAddr))
+		os.Exit(3)
+	} else {
+		user := static.DeviceTty.User
+		cred := static.DeviceTty.Cred
+		AddtoLog(fmt.Sprintf("Attempting to Tunnel into: %s", devAddr))
+		if err := sshIntoHost(devAddr, user, cred, "info"); err != nil {
+			AddtoLog(fmt.Sprintf("Failed to run command on device address %s: %v", devAddr, err))
+			os.Exit(4)
+		} else {
+			AddtoLog(fmt.Sprintf("Command ran successfully on device address %s", devAddr))
+			putTicketNote(0, "Tunnel was restarted successfully.")
+			os.Exit(0)
+		}
+	}
 }

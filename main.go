@@ -9,16 +9,66 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"pingo/static"
+	"strconv"
 	"time"
 
 	probing "github.com/prometheus-community/pro-bing"
 	"golang.org/x/crypto/ssh"
 )
 
-var devAddr = "10.100.10.1"  // This is where you'll SSH into
-var tunAddr = "10.100.10.12" // This is the tunnel we're monitoring
-var wanAddr = "1.1.1.1"      // This is the WAN address we're using to check connectivity
+var devAddr = static.Addr.Dev // This is where you'll SSH into if the tunnel is down
+var tunAddr = static.Addr.Tun // This is the tunnel we're monitoring
+var wanAddr = static.Addr.Wan // This is the WAN address we're using to check connectivity
 
+// checkManageForTicket checks the status of a ticket in ConnectWise Manage and returns true if the ticket is still valid (not closed).
+func checkManageForTicket(ticketID int) bool {
+	auth := ManageAuth()
+	var ticketValid bool
+	// Convert the Int to a string
+	ticketNumberStr := strconv.Itoa(ticketID)
+	// Create the webrequest
+	baseURL := "http://na.myconnectwise.net/v4_6_release/apis/3.0/service/tickets/" + ticketNumberStr
+	params := url.Values{}
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		fmt.Println("Error parsing URL:", err)
+	}
+	u.RawQuery = params.Encode()
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", u.String(), nil)
+	if err != nil {
+		fmt.Println("Error creating the webrequest", err)
+	}
+	req.Header.Add("clientId", "3e53e6c4-d9ca-4916-8651-bc1e33e1c132")
+	req.Header.Add("Authorization", "Basic "+auth)
+	// Do the webrequest
+	res, err := client.Do(req)
+	if err != nil {
+		fmt.Println("Error doing the webrequest", err)
+	}
+	defer res.Body.Close()
+	// Handle the response
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		fmt.Println("Error reading the body", err)
+	}
+	var ticketData Ticket
+	err = json.Unmarshal(body, &ticketData)
+	if err != nil {
+		fmt.Println("Error decoding the data", err)
+	}
+	switch ticketData.Status.ID {
+	case 736, 612, 452, 737, 739, 778, 17, 80, 9: // >Completed(QA Review), >QA Reviewed Closed/No Response, >QA Reviewed/Closed etc...
+		ticketValid = false
+	default:
+		ticketValid = true
+	}
+	AddtoLog(fmt.Sprintf("Ticket %d status: %s (ID: %d)\n", ticketID, ticketData.Status.Name, ticketData.Status.ID))
+	return ticketValid // If the ticket is valid, we won't create a new one. If it's been closed (which returns false), we will create a new one.
+}
+
+// postNewTicket creates a new ticket in ConnectWise Manage and returns the ticket ID.
 func postNewTicket() int {
 	auth := ManageAuth()
 	baseURL := "http://na.myconnectwise.net/v4_6_release/apis/3.0/service/tickets"
@@ -52,11 +102,13 @@ func postNewTicket() int {
 	return ticket.ID
 }
 
-func PutTicketNote(ticketID int, note string) {
-	fmt.Printf("Adding note to ticket %d: %s\n", ticketID, note)
+// TODO: Implement the PostTicketPayload function to return the JSON payload for creating a new ticket
+func putTicketNote(ticketID int, note string) {
+	// fmt.Printf("PutTicketNote Ran with the inputs of %d and %s\n", ticketID, note)
 	// Placeholder logic for adding a note to a ticket
 }
 
+// checkLogForTicket checks the pingo.log file for the latest ticket number and returns the ticket ID and a boolean indicating if a ticket was found.
 func checkLogForTicket() (int, bool) {
 	// Parse pingo.log for the latest ticket number
 	f, err := os.Open("pingo.log")
@@ -101,14 +153,8 @@ func checkLogForTicket() (int, bool) {
 	return 0, false
 }
 
-func checkManageForTicket(ticketID int) bool {
-	// Placeholder logic for checking if a ticket exists in Manage
-	// In a real implementation, this would query the Manage API
-	fmt.Printf("Checking if ticket %d exists in Manage...\n", ticketID)
-	return true // Assume the ticket exists for this example
-}
-
-func SshIntoHost(addr, user, pass, cmd string) error {
+// sshIntoHost connects to a host via SSH and executes a command after InitTtyToHost is called to check if the host is reachable first.
+func sshIntoHost(addr, user, pass, cmd string) error {
 	config := &ssh.ClientConfig{
 		User: user,
 		Auth: []ssh.AuthMethod{
@@ -141,29 +187,17 @@ func SshIntoHost(addr, user, pass, cmd string) error {
 	defer session.Close()
 
 	output, err := session.CombinedOutput(cmd)
+	outputStr := string(bytes.TrimSpace(output)) // Trim whitespace/newlines
 	if err != nil {
-		AddtoLog(fmt.Sprintf("Failed to run command: %v", err))
+		AddtoLog(fmt.Sprintf("SSH command error: %v", err))
+		AddtoLog(fmt.Sprintf("SSH command output: %s", outputStr))
 		return err
 	}
 	AddtoLog(fmt.Sprintf("SSH command output: %s", string(output)))
 	return nil
 }
 
-func initTtyToHost() {
-	if !TestAddress(devAddr, 2, 1*time.Second, 10*time.Second) {
-		AddtoLog(fmt.Sprintf("Device address %s is unresponsive", devAddr))
-		os.Exit(3)
-	} else {
-		AddtoLog(fmt.Sprintf("Attempting to Tunnel into: %s", devAddr))
-		if err := SshIntoHost(devAddr, "root", "pass", "ipsec restart"); err != nil {
-			os.Exit(4)
-		} else {
-			AddtoLog(fmt.Sprintf("Command ran successfully on device address %s", devAddr))
-			os.Exit(0)
-		}
-	}
-}
-
+// TestAddress pings the specified address and returns true if the address is reachable.
 func TestAddress(addr string, count int, interval time.Duration, timeout time.Duration) bool {
 	var testPassed bool
 	pinger, err := probing.NewPinger(addr)
@@ -198,6 +232,7 @@ func TestAddress(addr string, count int, interval time.Duration, timeout time.Du
 	return testPassed
 }
 
+// Logging function to write messages to pingo.log
 func AddtoLog(s string) {
 	f, err := os.OpenFile("pingo.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
 	if err != nil {
@@ -206,10 +241,15 @@ func AddtoLog(s string) {
 	defer f.Close()
 
 	logger := log.New(f, "", log.LstdFlags)
-	fmt.Println(s) // Remove in production, testing purposes only
+	// fmt.Println(s) // Remove in production, testing purposes only
 	logger.Println(s)
 }
 
+// Tests the tunnel constantly
+// If the tunnel is down, it will check the WAN address
+// If the WAN address is down, it will check the device address (if all three are down, the device is most likely disconnected from the network)
+// If the tunnel is down, but the WAN address is up, it will attempt to recover and submit a ticket
+// After restarting the tunnel and submitting a ticket, it should check if the tunnel is up again
 func main() {
 	i := 1 * time.Second  // Interval is the wait time between each packet send. Default is 1s.
 	t := 20 * time.Second // Timeout specifies a timeout before ping exits, regardless of how many packets have been received.
@@ -231,31 +271,33 @@ func main() {
 				}
 
 			} else {
-				AddtoLog(fmt.Sprintf("WAN address %s is reachable. Creating a ticket and restarting the tunnels...", wanAddr))
+				AddtoLog(fmt.Sprintf("WAN address %s is reachable. Checking for an open ticket and restarting the tunnels...", wanAddr))
 				i, b := checkLogForTicket()
 
 				if b {
-					AddtoLog(fmt.Sprintf("Ticket %d Present in Log. Checking it's status...", i))
+					AddtoLog(fmt.Sprintf("Ticket %d Present in Log. Checking it's validity via it's status ID...", i))
 
 					if checkManageForTicket(i) {
-						AddtoLog(fmt.Sprintf("Ticket %d is already present in Manage. Adding a note and exiting.", i))
-						PutTicketNote(i, "Tunnel is down. Host is attempting to restart the tunnel.")
-						initTtyToHost()
+						AddtoLog(fmt.Sprintf("Ticket %d is valid ticket. Adding a note and exiting.", i))
+						putTicketNote(i, "Tunnel is down. Host is attempting to restart the tunnel.")
+						InitTtyToHost()
 					} else {
 						AddtoLog(fmt.Sprintf("Ticket %d is not active in Manage. Creating a new ticket.", i))
 						t := postNewTicket()
 						AddtoLog(fmt.Sprintf("Ticket created with ID: %d", t))
-						PutTicketNote(t, "Tunnel is down. Host is attempting to restart the tunnel.")
-						initTtyToHost()
+						putTicketNote(t, "Tunnel is down. Host is attempting to restart the tunnel.")
+						InitTtyToHost()
 					}
 				} else {
 					t := postNewTicket()
 					AddtoLog(fmt.Sprintf("Ticket created with ID: %d", t))
 				}
-				initTtyToHost()
+				InitTtyToHost()
 			}
 		} else {
 			AddtoLog(fmt.Sprintf("Tunnel address %s is reachable. No action needed.", tunAddr))
+			fmt.Println(ManageAuth())
+
 		}
 		time.Sleep(1 * time.Second) // Wait before the next iteration
 	}
