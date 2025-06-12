@@ -249,6 +249,7 @@ type Ticket struct {
 	} `json:"customFields"`
 }
 
+// ManageAuth generates a base64 encoded string for authentication
 func ManageAuth() string {
 	companyName := static.Manage.User
 	publicKey := static.Manage.PubKey
@@ -258,6 +259,7 @@ func ManageAuth() string {
 	return base64Str
 }
 
+// PostTicketPayload generates a JSON payload for creating a new service ticket
 func PostTicketPayload() []byte {
 	var staticTicket = PostTicket{
 		RecordType: "ServiceTicket",
@@ -291,7 +293,7 @@ func InitTtyToHost() {
 		user := static.DeviceTty.User
 		cred := static.DeviceTty.Cred
 		AddtoLog(fmt.Sprintf("Attempting to Tunnel into: %s", devAddr))
-		if err := sshIntoHost(devAddr, user, cred, "info"); err != nil {
+		if err := sshIntoHost(devAddr, user, cred, "ipsec restart"); err != nil {
 			AddtoLog(fmt.Sprintf("Failed to run command on device address %s: %v", devAddr, err))
 			os.Exit(4)
 		} else {
