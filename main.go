@@ -2,82 +2,149 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"time"
 
-	p "github.com/prometheus-community/pro-bing"
+	probing "github.com/prometheus-community/pro-bing"
+	"golang.org/x/crypto/ssh"
 )
 
-func BadPing() {
-	if TestISP() { // if the ISP responds, tunnel is probably down
-		CreateTicket()
-		TtyIntoHost()
+var devAddr = "10.100.10.1"   // This is where you'll SSH into
+var tunAddr = "10.100.10.220" // This is the tunnel we're monitoring
+var wanAddr = "1.1.1.1"       // This is the WAN address we're using to check connectivity
+
+func SshIntoHost(addr, user, pass, cmd string) error {
+	config := &ssh.ClientConfig{
+		User: user,
+		Auth: []ssh.AuthMethod{
+			ssh.KeyboardInteractive(
+				func(user, instruction string, questions []string, echos []bool) ([]string, error) {
+					answers := make([]string, len(questions))
+					for i := range questions {
+						answers[i] = pass
+					}
+					return answers, nil
+				},
+			),
+		},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
+	}
+
+	client, err := ssh.Dial("tcp", addr+":22", config)
+	if err != nil {
+		AddtoLog(fmt.Sprintf("SSH connection failed: %v", err))
+		return err
+	}
+	defer client.Close()
+
+	session, err := client.NewSession()
+	if err != nil {
+		AddtoLog(fmt.Sprintf("Failed to create SSH session: %v", err))
+		return err
+	}
+	defer session.Close()
+
+	output, err := session.CombinedOutput(cmd)
+	if err != nil {
+		AddtoLog(fmt.Sprintf("Failed to run command: %v", err))
+		return err
+	}
+	AddtoLog(fmt.Sprintf("SSH command output: %s", string(output)))
+	return nil
+}
+
+func initTtyToHost() {
+	if !TestAddress(devAddr, 2, 1*time.Second, 10*time.Second) {
+		AddtoLog(fmt.Sprintf("Device address %s is unresponsive", devAddr))
+		os.Exit(3)
 	} else {
-		AddtoLog() // if the ISP does not respond, we can't create a ticket nor get the tunnel restored until the ISP is back online
-		os.Exit(11)
+		AddtoLog(fmt.Sprintf("Attempting to Tunnel into: %s", devAddr))
+		if err := SshIntoHost(devAddr, "root", "pass", "ipsec restart"); err != nil {
+			os.Exit(4)
+		} else {
+			AddtoLog(fmt.Sprintf("Command ran successfully on device address %s", devAddr))
+			os.Exit(0)
+		}
 	}
 }
 
-func TestISP() bool {
-	AddtoLog()
-	return true
-}
-
-func CreateTicket() int{
-	AddtoLog()
-	ticketNumber := 123456 // Simulated ticket number
-	return ticketNumber
-}
-
-func TtyIntoHost() {
-	fmt.Println("This function is not used in the main program.")
-}
-
-func ElevateTicket(t int) error{
-	if t >= 0 {
-		fmt.Print(t)
-		return nil
-	} else {
-		return fmt.Errorf("invalid ticket number: %d", t)
+func TestAddress(addr string, count int, interval time.Duration, timeout time.Duration) bool {
+	var testPassed bool
+	pinger, err := probing.NewPinger(addr)
+	if err != nil {
+		panic(err)
 	}
-}
 
-func CloseTicket(t int) error{
-	if t >= 0 {
-		fmt.Print(t)
-		return nil
-	} else {
-		return fmt.Errorf("invalid ticket number: %d", t)
+	pinger.SetPrivileged(true)
+	pinger.Count = count
+	pinger.Interval = interval
+	pinger.Timeout = timeout
+	err = pinger.Run()
+	if err != nil {
+		panic(err)
 	}
+
+	stats := pinger.Statistics() // get send/receive/rtt stats
+	AddtoLog(fmt.Sprintf("Packets sent: %d, Packets received: %d, RTT min/avg/max: %v/%v/%v",
+		stats.PacketsSent, stats.PacketsRecv, stats.MinRtt, stats.AvgRtt, stats.MaxRtt))
+	switch {
+
+	case stats.PacketsRecv == 0 || stats.MaxRtt == 0:
+		fmt.Printf("No packets received from %s, address is unreachable.\n", addr)
+		testPassed = false
+
+	case stats.PacketLoss > 0:
+		fmt.Printf("Some packets were lost when pinging %s, packet loss: %.2f%%.\n", addr, stats.PacketLoss)
+		testPassed = true
+
+	default:
+		fmt.Printf("Successfully pinged %s, average RTT: %v.\n", addr, stats.AvgRtt)
+		testPassed = true
+	}
+	return testPassed
 }
 
-func AddtoLog() {
-	fmt.Println("This function is not used in the main program.")
+func AddtoLog(s string) {
+	f, err := os.OpenFile("pingo.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
+	if err != nil {
+		log.Fatalf("Failed to open log file: %v", err)
+	}
+	defer f.Close()
+
+	logger := log.New(f, "", log.LstdFlags)
+	fmt.Println(s) // Remove in production, testing purposes only
+	logger.Println(s)
 }
 
 func main() {
-	address := "8.8.8.8"
-		for i := 0; i < 2; i++ {
-		pinger, err := p.NewPinger(address)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to create pinger: %v\n", err)
-		}
-		pinger.SetPrivileged(true) // Allows to run without sudo
-		pinger.Count = 10
-		err = pinger.Run()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Ping error: %v\n", err)
-			continue
-		}
-		stats := pinger.Statistics()
-		switch{
-			case stats.PacketLoss >= 20:
-				fmt.Printf("%s: Ping to %s resulted in %f%% packet loss.\n", time.Now().Format("2006-01-02_15:04:05"), address, stats.PacketLoss)
+	i := 1 * time.Second  // Interval is the wait time between each packet send. Default is 1s.
+	t := 20 * time.Second // Timeout specifies a timeout before ping exits, regardless of how many packets have been received.
+	c := 5                // Count tells pinger to stop after sending (and receiving) 'c' echo packets. If this option is not specified, pinger will operate until interrupted.
 
-			case stats.PacketLoss < 20 && stats.PacketLoss > 0:
-				fmt.Printf("Ping to %s resulted in %f%% packet loss.\n Average RTT: %s. Deviation: %s\n", address, stats.PacketLoss, stats.AvgRtt.String(), stats.StdDevRtt.String())
-			default:
-				fmt.Printf("Ping to %s resulted in zero packet loss.\n Average RTT: %s. Deviation: %s\n", address, stats.AvgRtt.String(), stats.StdDevRtt.String())
+	for range 1 {
+		if !TestAddress(tunAddr, c, i, t) {
+			AddtoLog(fmt.Sprintf("Tunnel address %s is unreachable. Testing %s", tunAddr, wanAddr))
+
+			if !TestAddress(wanAddr, c, i, t) {
+				AddtoLog(fmt.Sprintf("WAN address %s is also unreachable. Testing %s", wanAddr, devAddr))
+
+				if !TestAddress(devAddr, c, i, t) {
+					AddtoLog(fmt.Sprintf("Device address %s is unreachable. Host is most likely disconnected from the network.", devAddr))
+					os.Exit(1)
+				} else {
+					AddtoLog(fmt.Sprintf("Device address %s is reachable. Host is connected to network with no WAN connection.", devAddr))
+					os.Exit(2)
+				}
+
+			} else {
+				AddtoLog(fmt.Sprintf("WAN address %s is reachable. Restarting tunnel...", wanAddr))
+				initTtyToHost()
+			}
+		} else {
+			AddtoLog(fmt.Sprintf("Tunnel address %s is reachable. No action needed.", tunAddr))
 		}
+		time.Sleep(1 * time.Second) // Wait before the next iteration
 	}
 }
