@@ -1,8 +1,13 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"net/url"
 	"os"
 	"time"
 
@@ -11,11 +16,96 @@ import (
 )
 
 var devAddr = "10.100.10.1"  // This is where you'll SSH into
-var tunAddr = "10.100.10.11" // This is the tunnel we're monitoring
+var tunAddr = "10.100.10.12" // This is the tunnel we're monitoring
 var wanAddr = "1.1.1.1"      // This is the WAN address we're using to check connectivity
 
-func ticket() {
-	fmt.Println(PostTicketPayload())
+func postNewTicket() int {
+	auth := ManageAuth()
+	baseURL := "http://na.myconnectwise.net/v4_6_release/apis/3.0/service/tickets"
+	jsonData := PostTicketPayload()
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		fmt.Println("Error parsing URL:", err)
+	}
+	client := &http.Client{}
+	req, err := http.NewRequest("POST", u.String(), bytes.NewBuffer(jsonData))
+	if err != nil {
+		fmt.Println("Error creating the webrequest", err)
+	}
+	req.Header.Add("clientId", "3e53e6c4-d9ca-4916-8651-bc1e33e1c132")
+	req.Header.Add("Authorization", "Basic "+auth)
+	req.Header.Add("Content-Type", "application/json")
+	res, err := client.Do(req)
+	if err != nil {
+		fmt.Println("Error doing the webrequest", err)
+	}
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		fmt.Println("Error reading response body:", err)
+	}
+	defer res.Body.Close()
+	var ticket Ticket
+	err = json.Unmarshal(body, &ticket)
+	if err != nil {
+		fmt.Println("Error decoding the data", err)
+	}
+	return ticket.ID
+}
+
+func PutTicketNote(ticketID int, note string) {
+	fmt.Printf("Adding note to ticket %d: %s\n", ticketID, note)
+	// Placeholder logic for adding a note to a ticket
+}
+
+func checkLogForTicket() (int, bool) {
+	// Parse pingo.log for the latest ticket number
+	f, err := os.Open("pingo.log")
+	if err != nil {
+		fmt.Println("Error opening log file:", err)
+		return 0, false
+	}
+	defer f.Close()
+
+	buf := make([]byte, 4096)
+	var content []byte
+	for {
+		n, err := f.Read(buf)
+		if n > 0 {
+			content = append(content, buf[:n]...)
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			fmt.Println("Error reading log file:", err)
+			return 0, false
+		}
+	}
+
+	lines := bytes.SplitSeq(content, []byte{'\n'})
+	for line := range lines {
+		// Truncate the first 20 characters (date portion) if line is long enough
+		var trimmedLine []byte
+		if len(line) > 20 {
+			trimmedLine = line[20:]
+		} else {
+			trimmedLine = line
+		}
+		// Look for lines like: "Ticket created with ID: <number>"
+		var id int
+		n, _ := fmt.Sscanf(string(trimmedLine), "Ticket created with ID: %d", &id)
+		if n == 1 {
+			return id, true
+		}
+	}
+	return 0, false
+}
+
+func checkManageForTicket(ticketID int) bool {
+	// Placeholder logic for checking if a ticket exists in Manage
+	// In a real implementation, this would query the Manage API
+	fmt.Printf("Checking if ticket %d exists in Manage...\n", ticketID)
+	return true // Assume the ticket exists for this example
 }
 
 func SshIntoHost(addr, user, pass, cmd string) error {
@@ -91,20 +181,18 @@ func TestAddress(addr string, count int, interval time.Duration, timeout time.Du
 	}
 
 	stats := pinger.Statistics() // get send/receive/rtt stats
-	AddtoLog(fmt.Sprintf("Packets sent: %d, Packets received: %d, RTT min/avg/max: %v/%v/%v",
-		stats.PacketsSent, stats.PacketsRecv, stats.MinRtt, stats.AvgRtt, stats.MaxRtt))
+	// AddtoLog(fmt.Sprintf("Packets sent: %d, Packets received: %d, RTT min/avg/max: %v/%v/%v", // Commented out for cleaner logging
+	// 	stats.PacketsSent, stats.PacketsRecv, stats.MinRtt, stats.AvgRtt, stats.MaxRtt))
 	switch {
 
 	case stats.PacketsRecv == 0 || stats.MaxRtt == 0:
-		fmt.Printf("No packets received from %s, address is unreachable.\n", addr)
 		testPassed = false
 
-	case stats.PacketLoss > 0:
-		fmt.Printf("Some packets were lost when pinging %s, packet loss: %.2f%%.\n", addr, stats.PacketLoss)
+	case stats.PacketsSent > stats.PacketsRecv || stats.PacketLoss > 0:
+		AddtoLog(fmt.Sprintf("Ping to address %s reveals packet loss at: %f%%", addr, stats.PacketLoss))
 		testPassed = true
 
 	default:
-		fmt.Printf("Successfully pinged %s, average RTT: %v.\n", addr, stats.AvgRtt)
 		testPassed = true
 	}
 	return testPassed
@@ -127,7 +215,7 @@ func main() {
 	t := 20 * time.Second // Timeout specifies a timeout before ping exits, regardless of how many packets have been received.
 	c := 5                // Count tells pinger to stop after sending (and receiving) 'c' echo packets. If this option is not specified, pinger will operate until interrupted.
 
-	for range 1 {
+	for range 1 { // Wrapping in a for range loop to allow for termination or extension in the future
 		if !TestAddress(tunAddr, c, i, t) {
 			AddtoLog(fmt.Sprintf("Tunnel address %s is unreachable. Testing %s", tunAddr, wanAddr))
 
@@ -143,13 +231,31 @@ func main() {
 				}
 
 			} else {
-				AddtoLog(fmt.Sprintf("WAN address %s is reachable. Restarting tunnel...", wanAddr))
+				AddtoLog(fmt.Sprintf("WAN address %s is reachable. Creating a ticket and restarting the tunnels...", wanAddr))
+				i, b := checkLogForTicket()
+
+				if b {
+					AddtoLog(fmt.Sprintf("Ticket %d Present in Log. Checking it's status...", i))
+
+					if checkManageForTicket(i) {
+						AddtoLog(fmt.Sprintf("Ticket %d is already present in Manage. Adding a note and exiting.", i))
+						PutTicketNote(i, "Tunnel is down. Host is attempting to restart the tunnel.")
+						initTtyToHost()
+					} else {
+						AddtoLog(fmt.Sprintf("Ticket %d is not active in Manage. Creating a new ticket.", i))
+						t := postNewTicket()
+						AddtoLog(fmt.Sprintf("Ticket created with ID: %d", t))
+						PutTicketNote(t, "Tunnel is down. Host is attempting to restart the tunnel.")
+						initTtyToHost()
+					}
+				} else {
+					t := postNewTicket()
+					AddtoLog(fmt.Sprintf("Ticket created with ID: %d", t))
+				}
 				initTtyToHost()
-				ticket()
 			}
 		} else {
 			AddtoLog(fmt.Sprintf("Tunnel address %s is reachable. No action needed.", tunAddr))
-			ticket()
 		}
 		time.Sleep(1 * time.Second) // Wait before the next iteration
 	}
