@@ -251,11 +251,11 @@ func AddtoLog(s string) {
 // If the tunnel is down, but the WAN address is up, it will attempt to recover and submit a ticket
 // After restarting the tunnel and submitting a ticket, it should check if the tunnel is up again
 func main() {
-	i := 1 * time.Second  // Interval is the wait time between each packet send. Default is 1s.
-	t := 20 * time.Second // Timeout specifies a timeout before ping exits, regardless of how many packets have been received.
-	c := 5                // Count tells pinger to stop after sending (and receiving) 'c' echo packets. If this option is not specified, pinger will operate until interrupted.
+	i := 2 * time.Second  // Interval is the wait time between each packet send. Default is 1s.
+	t := 30 * time.Second // Timeout specifies a timeout before ping exits, regardless of how many packets have been received.
+	c := 10               // Count tells pinger to stop after sending (and receiving) 'c' echo packets. If this option is not specified, pinger will operate until interrupted.
 
-	for range 1 { // Wrapping in a for range loop to allow for termination or extension in the future
+	for range 3 { // Wrapping in a for range loop to allow for termination or extension in the future
 		if !TestAddress(tunAddr, c, i, t) {
 			AddtoLog(fmt.Sprintf("Tunnel address %s is unreachable. Testing %s", tunAddr, wanAddr))
 
@@ -296,9 +296,7 @@ func main() {
 			}
 		} else {
 			AddtoLog(fmt.Sprintf("Tunnel address %s is reachable. No action needed.", tunAddr))
-			fmt.Println(ManageAuth())
-
 		}
-		time.Sleep(1 * time.Second) // Wait before the next iteration
+		time.Sleep(30 * time.Second) // Wait before the next iteration
 	}
 }
